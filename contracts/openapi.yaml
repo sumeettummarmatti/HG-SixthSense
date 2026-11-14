@@ -1,0 +1,1969 @@
+openapi: 3.1.0
+info:
+  title: SixthSense API
+  version: 0.6.0
+  description: >
+    Week-1 contract skeleton. Endpoints are filled in during ALL-W1-api-contract.
+    Core zone = backend service; Insight zone = insight service (separate host, no user IDs).
+servers:
+  - url: http://localhost:8000
+    description: Core (local)
+  - url: http://localhost:8001
+    description: Insight (local)
+tags:
+  - {name: auth, description: "OTP, device binding, sessions (P2)"}
+  - {name: verification, description: "Tiers 1-3, liveness, institution, police clearance, vouch (P3)"}
+  - {name: contacts, description: "Trusted contacts add / silent remove / list (P2)"}
+  - {name: journey, description: "Plan, start, heartbeat, check-in, PIN, SOS, arrive (P2)"}
+  - {name: escalation, description: "Acknowledge, status for contacts (P2)"}
+  - {name: walk, description: "Request, accept, confirm, handshake, end, complain (P3)"}
+  - {name: profile, description: "My profile for Walk With Me (P1)"}
+  - {name: feedback, description: "How was it? stored raw, exported by script (P2)"}
+  - {name: responder, description: "On/off duty, presence (P3)"}
+  - {name: reports, description: "Anonymous submit, published clusters (P4, Insight)"}
+  - {name: routing, description: "Route with caution level (P4)"}
+  - {name: dashboard, description: "Clusters, mark addressed, metrics (P4)"}
+  - {name: realtime, description: "WebSocket: ciphertext relay, alerts, walk updates (P2)"}
+
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Liveness check (both services)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+                  service: {type: string, enum: [core, insight]}
+  /verification/sessions:
+    post:
+      tags: [verification]
+      summary: Start consented responder verification
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [purpose, consent]
+              properties:
+                purpose: {type: string, enum: [responder]}
+                consent: {type: boolean, const: true}
+                face_template_consent:
+                  type: boolean
+                  default: false
+                  description: Separate optional consent to retain an encrypted CompreFace embedding for recurring Walk With Me companion checks.
+      responses:
+        "201": {description: Verification session created}
+        "400": {description: Consent required}
+  /verification/face-template:
+    post:
+      tags: [verification]
+      summary: Enroll or replace a reusable face embedding
+      description: Requires an active verified adult identity and explicit consent. Both images are transient. A face match is required before an encrypted embedding is retained.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [consent, id_image, selfie_image]
+              properties:
+                consent: {type: boolean, const: true}
+                id_image: {type: string, format: binary}
+                selfie_image: {type: string, format: binary}
+      responses:
+        "200": {description: Enrolled or replaced after a passing face match}
+        "403": {description: Identity is not currently verified}
+        "422": {description: Images are invalid or the face comparison failed}
+    delete:
+      tags: [verification]
+      summary: Delete the current account's reusable face embedding
+      security: [{bearer: []}]
+      responses:
+        "204": {description: Deleted, or already absent}
+  /verification/me:
+    get:
+      tags: [verification]
+      summary: Read own verification and reusable face-template status
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: Own status only; never returns the embedding
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  face_template_enabled: {type: boolean}
+  /auth/otp/request:
+    post:
+      tags: [auth]
+      summary: Email a 6-digit sign-in code
+      description: >
+        Sign-in and sign-up are the same flow. Always returns 202 {"status":"sent"} for any valid
+        address, whether or not an account exists. The code expires in 10 minutes and works once;
+        a new request replaces the previous code. Limits: 3 requests per email and 10 per IP
+        per 10 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OtpRequest"}
+            example: {email: priya@college.edu}
+      responses:
+        "202":
+          description: Code sent (same response for every address)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OtpRequestAccepted"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "429":
+          description: "Rate limited (detail: rate_limited). Retry-After header in seconds."
+          headers:
+            Retry-After: {schema: {type: integer, example: 600}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+              example: {detail: rate_limited}
+  /auth/otp/verify:
+    post:
+      tags: [auth]
+      summary: Check the emailed code and bind this phone's Keystore key
+      description: >
+        Max 5 attempts per code, then it locks (429) until a new code is requested. On success the
+        account is created if new (Tier 0, no ID needed) and this device's EC P-256 public key is
+        registered. Keep `device_id`: later sign-ins use /auth/device/* instead of email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OtpVerify"}
+            example:
+              email: priya@college.edu
+              code: "042917"
+              device_public_key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Session"}
+        "400":
+          description: "Wrong, expired or already-used code (detail: invalid_or_expired_code)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "403":
+          description: "Account suspended (detail: account_suspended)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "This device key is registered to another account or revoked (detail: device_key_in_use)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "422":
+          description: "Bad input, or device key is not EC P-256 (detail: invalid_device_key). The code is not used up."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          description: "Too many wrong attempts (detail: too_many_attempts). Request a new code."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /auth/device/challenge:
+    post:
+      tags: [auth]
+      summary: Get a single-use nonce for the phone to sign
+      description: Valid for 120 seconds. Issued for any device_id (no probing for valid IDs).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DeviceChallengeRequest"}
+      responses:
+        "200":
+          description: Nonce to sign
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceChallenge"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+  /auth/device/verify:
+    post:
+      tags: [auth]
+      summary: Sign in with the Keystore key (no email code)
+      description: >
+        Sign the UTF-8 bytes of `sixthsense-device-auth-v1|<device_id>|<nonce>` with the device's
+        Keystore key using SHA256withECDSA, and send the DER signature base64-encoded. The nonce
+        works once. Use this whenever the access token expires (every 15 minutes).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DeviceVerify"}
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Session"}
+        "401":
+          description: "Bad/expired/used nonce, wrong signature, revoked device or suspended account (detail: device_auth_failed)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+  /auth/device/e2e-keys:
+    put:
+      tags: [auth]
+      summary: Publish this device's E2E location keys
+      description: >
+        Upload the raw 32-byte X25519 (key agreement) and Ed25519 (signing) public keys used by the
+        live-location envelope (P1-W6). These are separate from the P-256 sign-in key. Uploading
+        again replaces them and returns a new key_id. Call after every sign-in on a new install.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/E2EKeysUpload"}
+      responses:
+        "200":
+          description: Keys stored
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/E2EKeys"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "422":
+          description: "Not base64, not 32 bytes, or an all-zero X25519 key (detail: invalid_e2e_key)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /contacts/invites:
+    post:
+      tags: [contacts]
+      summary: Create a one-time invite link to share from the phone
+      description: >
+        The owner shares `invite_url` with the phone's share sheet (WhatsApp, SMS...). The server
+        never sees the contact's name or phone number: keep those on the phone, mapped to
+        `contact_link_id`. The token is after '#', so it is never sent to a web server. Expires in
+        48 h. Max 5 contacts (accepted + pending) and 10 invites per hour.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/InviteCreate"}
+            example: {owner_label: Priya}
+      responses:
+        "201":
+          description: Invite created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Invite"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "409":
+          description: "Already 5 contacts/pending invites (detail: contact_limit_reached)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "429":
+          description: "Too many invites this hour (detail: rate_limited)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /contacts/invites/accept:
+    post:
+      tags: [contacts]
+      summary: Accept an invite (called by the contact, signed in)
+      description: Accepting the same invite again returns 200 and changes nothing.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/InviteAccept"}
+      responses:
+        "200":
+          description: You are now this person's trusted contact
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/InviteAccepted"}
+        "400":
+          description: "Your own invite (detail: cannot_add_self)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Unknown, expired, cancelled or already used by someone else (detail: invite_invalid)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /contacts:
+    get:
+      tags: [contacts]
+      summary: List my trusted contacts (pending and accepted)
+      description: >
+        Only the owner's own links. Contacts get an empty list for people they watch over
+        (rule 4: nothing outside an active journey or alert). No contact details are returned.
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: My contacts
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContactList"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /contacts/{link_id}:
+    delete:
+      tags: [contacts]
+      summary: Remove a contact or cancel a pending invite (silent)
+      description: The contact is never told. Their access ends immediately.
+      security: [{bearer: []}]
+      parameters:
+        - {name: link_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "204": {description: Removed}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not one of my contacts (detail: contact_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /contacts/{link_id}/keys:
+    get:
+      tags: [contacts]
+      summary: E2E public keys of an accepted contact's devices
+      description: Use these to encrypt live location to each of the contact's devices (P1-W6).
+      security: [{bearer: []}]
+      parameters:
+        - {name: link_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: One entry per active device that uploaded keys (can be empty)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ContactKeys"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my contact, or not accepted yet (detail: contact_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/protocol:
+    get:
+      tags: [journey]
+      summary: My journey settings (defaults if never set)
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProtocolSettings"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+    put:
+      tags: [journey]
+      summary: Save my journey settings
+      description: >
+        Applies to journeys started afterwards; a running journey keeps the timers it started with.
+        The phone must run the same timers locally (ADR-2).
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ProtocolSettings"}
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ProtocolSettings"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "422":
+          description: "Out-of-range timer, or alert_contact_ids has an id that is not an accepted contact of mine (detail: unknown_contact)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys:
+    post:
+      tags: [journey]
+      summary: Start a journey
+      description: >
+        Copies the current protocol. No destination or location is sent: those stay on the phone.
+        One open journey at a time.
+      security: [{bearer: []}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/JourneyStart"}
+      responses:
+        "201":
+          description: Started
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "409":
+          description: "A journey is already open (detail: journey_already_open)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/current:
+    get:
+      tags: [journey]
+      summary: My open journey, with any timer steps the server has applied
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: Open journey
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "No open journey (detail: no_open_journey)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/{journey_id}/heartbeat:
+    post:
+      tags: [journey]
+      summary: Still here (no location)
+      description: >
+        Send at least every heartbeat_timeout_min / 2 minutes while the journey is open, or the server alerts contacts.
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Journey as the phone should show it
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my journey (detail: journey_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Journey is over (detail: journey_over)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/{journey_id}/check-in:
+    post:
+      tags: [journey]
+      summary: Report a PIN check-in (real or duress)
+      description: >
+        The PIN is checked on the phone and never sent. 'ok' and 'duress' get exactly the same response; duress silently starts a full escalation and the journey keeps looking normal to the phone.
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CheckIn"}
+      responses:
+        "200":
+          description: Journey as the phone should show it
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my journey (detail: journey_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Journey is over (detail: journey_over), or the event does not fit the current state (detail: invalid_for_state)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/{journey_id}/prompt:
+    post:
+      tags: [journey]
+      summary: The phone missed a check-in and is showing the private PIN prompt
+      description: >
+        Moves the journey to private_prompt and restarts the prompt window (prompt_timeout_min).
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Journey as the phone should show it
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my journey (detail: journey_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Journey is over (detail: journey_over), or the event does not fit the current state (detail: invalid_for_state)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/{journey_id}/sos:
+    post:
+      tags: [journey]
+      summary: SOS
+      description: >
+        Full escalation now. With covert=true the phone keeps being shown a normal journey.
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Sos"}
+      responses:
+        "200":
+          description: Journey as the phone should show it
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my journey (detail: journey_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Journey is over (detail: journey_over), or the event does not fit the current state (detail: invalid_for_state)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/{journey_id}/arrive:
+    post:
+      tags: [journey]
+      summary: Arrived
+      description: >
+        Ends the journey (outcome arrived). Not allowed while contacts are being alerted. After a duress PIN or covert SOS it shows 'resolved' but the escalation continues.
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Journey as the phone should show it
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my journey (detail: journey_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Journey is over (detail: journey_over), or the event does not fit the current state (detail: invalid_for_state)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /journeys/{journey_id}/end:
+    post:
+      tags: [journey]
+      summary: End the journey early
+      description: >
+        Same as arrive, with outcome ended.
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Journey as the phone should show it
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/JourneyView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not my journey (detail: journey_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Journey is over (detail: journey_over), or the event does not fit the current state (detail: invalid_for_state)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /notifications/signing-keys:
+    get:
+      tags: [notification]
+      summary: Public keys that sign push alerts (no sign-in)
+      description: |
+        Push alerts carry FCM data fields: `alert` (canonical JSON: sorted keys, no spaces, UTF-8),
+        `sig` (base64 Ed25519 signature over the exact `alert` string bytes) and `kid` (key id).
+        The app verifies `sig` with the key whose key_id = kid, then trusts the JSON:
+        {v, type: "alert", escalation_id, level, covert, owner_label, opened_at, issued_at, code}.
+        Bundle the current key in the app and refresh from here; after a rotation the previous key
+        stays listed. Telegram/email alerts carry `code`, which GET /escalations/active also shows
+        as verification_code: if they differ, the message is fake.
+      responses:
+        "200":
+          description: Current key first, then the previous one after a rotation
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SigningKeys"}
+  /notifications/channels:
+    get:
+      tags: [notification]
+      summary: Which alert channels I have set up (as a contact)
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ChannelStatus"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /notifications/push-token:
+    put:
+      tags: [notification]
+      summary: Save this device's FCM token (send after sign-in and on FCM token refresh)
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PushToken"}
+      responses:
+        "204": {description: Saved (encrypted)}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+    delete:
+      tags: [notification]
+      summary: Stop push alerts on this device
+      security: [{bearer: []}]
+      responses:
+        "204": {description: Removed}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /notifications/telegram/link:
+    post:
+      tags: [notification]
+      summary: Get a one-time t.me link to receive alerts on Telegram
+      description: Open it and press Start in Telegram. Valid 10 minutes.
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TelegramLink"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "409":
+          description: "No Telegram bot configured on the server (detail: telegram_not_configured)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /notifications/telegram:
+    delete:
+      tags: [notification]
+      summary: Stop Telegram alerts
+      security: [{bearer: []}]
+      responses:
+        "204": {description: Unlinked}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /notifications/email:
+    put:
+      tags: [notification]
+      summary: Opt in to alert emails (must be your own sign-in email)
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AlertEmail"}
+      responses:
+        "204": {description: Saved (encrypted)}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "422":
+          description: "Not your sign-in email (detail: email_must_match_sign_in)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    delete:
+      tags: [notification]
+      summary: Stop alert emails
+      security: [{bearer: []}]
+      responses:
+        "204": {description: Removed}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escalations/active:
+    get:
+      tags: [escalation]
+      summary: Alerts I'm a recipient of that are still open (as a contact)
+      description: Nothing is visible once an alert closes (rule 4). The owner never sees this list.
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ActiveEscalations"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escalations/{escalation_id}/ack:
+    post:
+      tags: [escalation]
+      summary: I'm on it
+      description: >
+        Stops further alerts to every contact. For a missed check-in it also pauses the automatic
+        upgrade to a full escalation: resolve it or raise the alarm next.
+      security: [{bearer: []}]
+      parameters:
+        - {name: escalation_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Acknowledged"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not open or not a recipient (detail: escalation_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /escalations/{escalation_id}/resolve:
+    post:
+      tags: [escalation]
+      summary: They're safe
+      description: >
+        A missed check-in goes back to a normal journey; a full escalation (including a silent
+        alarm) ends the journey. Other alerted contacts get an all-clear.
+      security: [{bearer: []}]
+      parameters:
+        - {name: escalation_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Resolved"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not open or not a recipient (detail: escalation_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Nothing to resolve (detail: nothing_to_resolve)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /escalations/{escalation_id}/raise:
+    post:
+      tags: [escalation]
+      summary: I can't reach them, raise the alarm
+      description: Turns a missed check-in into a full escalation; every contact gets an urgent alert.
+      security: [{bearer: []}]
+      parameters:
+        - {name: escalation_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Raised"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404":
+          description: "Not open or not a recipient (detail: escalation_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: "Nothing to raise (detail: nothing_to_raise)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /escalations/ack:
+    post:
+      tags: [escalation]
+      summary: I'm on it, from the link in a Telegram message or email (no sign-in)
+      description: >
+        The link is PUBLIC_BASE_URL/escalations/ack#<token>; a small page there posts the token
+        here when the contact taps the button. The token never reaches server logs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LinkAck"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Acknowledged"}
+        "404":
+          description: "Unknown token or alert already closed (detail: escalation_not_found)"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+  /relay/ws:
+    get:
+      tags: [realtime]
+      summary: "WebSocket: end-to-end encrypted live location (ciphertext only, nothing stored)"
+      description: |
+        Open a WebSocket (ws:// locally, wss:// in the pilot). JSON text frames.
+
+        1. First frame, within 10 s: {"type": "auth", "access_token": "<token>"} -> {"type": "ready"}.
+           Never put the token in the URL. When the token expires the server sends
+           {"type": "error", "detail": "token_expired"} and closes with code 4401; reconnect with a
+           fresh token (POST /auth/device/challenge + /auth/device/verify). Bad auth also closes 4401.
+        2. Traveller sends, during an open journey (including a silent alarm):
+           {"type": "location", "envelopes": [<LiveLocationEnvelope.toJson()>, ...]}, one envelope
+           per recipient device (keys from GET /contacts/{link_id}/keys), 1-10 per frame, at most
+           10 frames per 5 s. session_id must be the journey id; sender_key_id must be this device's
+           current key_id from PUT /auth/device/e2e-keys.
+           Reply: {"type": "sent", "delivered": n, "offline": n, "not_allowed": n}. Offline means the
+           contact wasn't connected and the envelope was dropped (never queued or stored).
+           Errors: bad_envelopes, bad_envelope, unsupported_version, mixed_sessions, no_open_journey,
+           stale_sender_key (re-fetch your key_id), rate_limited.
+        3. Contact receives (only during that traveller's open journey or alert, and only if on the
+           alert list): {"type": "location", "envelope": {...unchanged...},
+           "sender": {"key_id": "<uuid>", "ed25519_public_key": "<base64>"}}. Verify with
+           LiveLocationCipher.decrypt using the sender block as the verification key.
+        4. Either side: {"type": "ping"} -> {"type": "pong"}. Send a ping every ~30 s to keep the
+           connection alive and notice an expired token early.
+        5. Audio (P2-W2-encrypted-audio-relay): the traveller sends
+           {"type": "audio", "envelopes": [...]}: one 5 s AAC clip per frame, encrypted with
+           LiveLocationCipher.encryptAudio (HKDF info "sixthsense/audio-clip/v1"), ciphertext up to
+           65536 chars, at most 8 frames per 20 s. Allowed only during an alert (contacts on the alert
+           list + responders on their way) or a running audio escort (its listeners); otherwise
+           error not_listening. Listeners receive {"type": "audio", "envelope": ..., "sender": ...}.
+           For a listener who is offline the server keeps the ciphertext (which it cannot read) in
+           Redis only: last 30 min of clips, 24 h at most, handed over right after "ready" on
+           reconnect, and dropped unread once they may no longer hear the traveller.
+      responses:
+        "101": {description: Switching protocols to WebSocket}
+  /escalations/{escalation_id}/owner-keys:
+    get:
+      tags: [escalation]
+      summary: "Traveller's device keys, for a contact who said I'm on it"
+      description: "Lets the helper share their own location back to the traveller (E2E). 404 unless open and helping."
+      security: [{bearer: []}]
+      parameters:
+        - {name: escalation_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OwnerKeys"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escalations/help/{journey_id}:
+    get:
+      tags: [escalation]
+      summary: "Who is coming to help (traveller only)"
+      description: "Polled by the traveller's phone during a journey. Helpers carry device keys so the phone adds responders to its E2E live location and verifies helpers' locations."
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/HelpView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escalations/area/{journey_id}:
+    put:
+      tags: [escalation]
+      summary: "Rough area during a full alert"
+      description: "Rounded to ~110 m on the server, kept in Redis 10 minutes, used only to find on-duty responders nearby. 409 no_full_alert otherwise."
+      security: [{bearer: []}]
+      parameters:
+        - {name: journey_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LatLng"}
+      responses:
+        "204": {description: Done}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /responders/apply:
+    post:
+      tags: [matching]
+      summary: "Apply to be a responder"
+      description: "No approval step: applying makes me a responder. I can go on duty and be asked only while my identity is verified (ID + selfie, /verification), adult, unexpired and not revoked (403 not_eligible otherwise). Revoked by scripts/responders.py after a complaint. No ID stored."
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ResponderApply"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ResponderMe"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /responders/me:
+    get:
+      tags: [matching]
+      summary: "My responder status"
+      description: "none | approved (applied; no approval step) | revoked, and whether I'm on duty."
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ResponderMe"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /responders/presence:
+    put:
+      tags: [matching]
+      summary: "On duty: refresh my rough area (about every minute)"
+      description: "Approved responders only. Rounded to ~110 m, kept in Redis, forgotten 5 minutes after the last refresh."
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LatLng"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OnDuty"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+    delete:
+      tags: [matching]
+      summary: "Go off duty"
+      description: "Forget my rough area now."
+      security: [{bearer: []}]
+      responses:
+        "204": {description: Done}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /responders/offers:
+    get:
+      tags: [matching]
+      summary: "Nearby requests I was asked to help with"
+      description: "Only open alerts. Rough area and distance until I say I'm going; journey_id after it."
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ResponderOffers"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /responders/offers/{offer_id}/going:
+    post:
+      tags: [matching]
+      summary: "I'm going"
+      description: >
+        The first two get the traveller's precise live location (E2E); 409 enough_helpers after
+        that. Returns the traveller's keys so I can share my location back. Saying "I'm going"
+        needs a fresh face scan of the person holding the phone (selfie_image) in this same
+        request: FACE_CHECK_PROVIDER=mock checks only that a real image was sent (the phone checks
+        one face is visible); compreface matches it against the face template saved at
+        verification. The image is never stored. Asking again once going returns the keys without
+        a new scan.
+      security: [{bearer: []}]
+      parameters:
+        - {name: offer_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: false
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                selfie_image: {type: string, format: binary, description: "JPEG, PNG or WebP, max 5 MB"}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OwnerKeys"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "403": {description: "not_eligible, not_a_responder or face_mismatch"}
+        "409": {description: "enough_helpers, or face_template_not_enrolled (compreface)"}
+        "413": {description: image_too_large}
+        "415": {description: unsupported_image_type}
+        "422": {description: "empty_image or face_image_invalid"}
+        "428": {description: face_scan_required}
+        "503": {description: "Face matcher unavailable (compreface): fails closed, retry"}
+  /responders/offers/{offer_id}/decline:
+    post:
+      tags: [matching]
+      summary: "I can't right now"
+      description: ""
+      security: [{bearer: []}]
+      parameters:
+        - {name: offer_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "204": {description: Done}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /responders/offers/{offer_id}/arrived:
+    post:
+      tags: [matching]
+      summary: "I've reached them"
+      description: "Shown to the traveller."
+      security: [{bearer: []}]
+      parameters:
+        - {name: offer_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "204": {description: Done}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts:
+    post:
+      tags: [escort]
+      summary: "Start an audio escort (owner's phone only)"
+      description: "Chosen contacts hear the owner live (E2E audio over /relay/ws) until it ends. 5-180 minutes. 404 no_open_journey, 422 unknown_contact, 409 escort_already_on."
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/EscortStart"}
+      responses:
+        "201":
+          description: Started
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EscortView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts/current:
+    get:
+      tags: [escort]
+      summary: "My running escort (404 no_escort)"
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EscortView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts/{escort_id}/stop:
+    post:
+      tags: [escort]
+      summary: "Stop with the PIN checked on the phone"
+      description: "ok and duress get the same answer; duress also starts a covert SOS on the journey, so contacts are alerted and keep hearing the owner."
+      security: [{bearer: []}]
+      parameters:
+        - {name: escort_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CheckIn"}
+      responses:
+        "200":
+          description: Stopped
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Stopped"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts/listening:
+    get:
+      tags: [escort]
+      summary: "Escorts I may listen to right now"
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ListeningList"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts/supporting:
+    get:
+      tags: [escort]
+      summary: "People who made me their trusted contact (to ask for an escort)"
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SupportedList"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts/requests:
+    post:
+      tags: [escort]
+      summary: "A contact asks the owner to start an escort"
+      description: "One pending request per link for 10 minutes. The owner is notified; only they can start one."
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contact_link_id]
+              properties:
+                contact_link_id: {type: string, format: uuid}
+      responses:
+        "201":
+          description: Asked
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EscortRequestView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+    get:
+      tags: [escort]
+      summary: "Pending requests to me (last 10 minutes)"
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items: {$ref: "#/components/schemas/EscortRequestView"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /escorts/requests/{request_id}/decline:
+    post:
+      tags: [escort]
+      summary: "Say no to a request"
+      security: [{bearer: []}]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Stopped"}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+  /routes:
+    get:
+      tags: [routing]
+      summary: Walking routes between two points, ranked for this hour (Insight, no sign-in)
+      description: >
+        Several distinct walking routes from a routing engine, each scored by what is around it
+        (streetlights, places open, bus stops, stations, police, hospitals) and pulled down by
+        published report cells. The recommended route is at most 25% / 600 m longer than the
+        shortest. A route request carries no identity (rule 4); start and destination are never
+        stored or logged (rule 2). No route is labelled safe (rule 5).
+      parameters:
+        - {name: from, in: query, required: true, description: "lat,lon",
+           schema: {type: string, example: "12.9719,77.6412"}}
+        - {name: to, in: query, required: true, description: "lat,lon",
+           schema: {type: string, example: "12.9610,77.6390"}}
+        - {name: at, in: query, required: false,
+           description: "day | evening | night | ISO datetime; default is now (Asia/Kolkata)",
+           schema: {type: string, example: night}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RankedRoutes"}
+        "404": {description: no_route}
+        "422": {description: "outside_area, or a bad parameter"}
+        "503": {description: routing_unavailable}
+  /routes/reports:
+    post:
+      tags: [reports]
+      summary: Anonymous report about a place; feeds route ranking (Insight, no sign-in)
+      description: >
+        Kept as a ~55 m cell, a category, a time and an HMAC of the opaque reporter token, nothing
+        else (rule 6). A cell is shown to anyone, and used by routing, only once it has
+        PUBLISH_MIN_REPORTS reports from PUBLISH_MIN_DEVICES different reporters. Evidence halves
+        every 30 days and expires after 90.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PlaceReport"}
+      responses:
+        "202": {description: accepted}
+        "422": {description: "outside_area, or a bad body"}
+        "429": {description: "too_many_reports (per reporter token, per hour)"}
+  /routes/area:
+    get:
+      tags: [routing]
+      summary: The area we have data for, with feature counts and published report cells
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RouteArea"}
+  /profile:
+    get:
+      tags: [profile]
+      summary: My profile (404 no_profile right after the first sign-in)
+      security: [{bearer: []}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "404": {description: no_profile}
+    put:
+      tags: [profile]
+      summary: Create or edit my profile
+      description: >
+        Shown to someone else only inside a consented Walk With Me match (rule 4). Gender is
+        optional and used only for the traveller's "women companions only" filter; it is never
+        shown to anyone.
+      security: [{bearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/Profile"}}}}
+        "401": {$ref: "#/components/responses/NotAuthenticated"}
+        "422": {description: Invalid field}
+  /walks/companion/join:
+    post:
+      tags: [walk]
+      summary: Become a companion (needs a verified identity; no approval step)
+      description: >
+        Needs a profile with willing_companion and a verified, adult, unexpired identity from
+        /verification (ID + selfie); 409 identity_not_verified sends the app to verification.
+        Replaces the old always-pass demo verification. Revoked by backend/scripts/companions.py.
+      security: [{bearer: []}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/CompanionMe"}}}}
+        "403": {description: companion_revoked}
+        "409": {description: "profile_not_willing or identity_not_verified"}
+  /walks/companion/me:
+    get:
+      tags: [walk]
+      summary: My companion status
+      security: [{bearer: []}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/CompanionMe"}}}}
+  /walks/companion/presence:
+    put:
+      tags: [walk]
+      summary: I'm available (eligible companions; refresh every minute, rough area only)
+      security: [{bearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/WalkArea"}}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available, expires_in_seconds]
+                properties: {available: {type: boolean}, expires_in_seconds: {type: integer}}
+        "403": {description: "not_eligible (not joined, identity not verified/expired, or revoked)"}
+        "409": {description: profile_not_willing}
+    delete:
+      tags: [walk]
+      summary: I'm not available
+      security: [{bearer: []}]
+      responses: {"204": {description: Done}}
+  /walks/search:
+    post:
+      tags: [walk]
+      summary: Available companions near me (traveller on an open journey)
+      description: Rough distances only (rounded to 100 m); coordinates in the body, never the URL.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [journey_id, latitude, longitude]
+              properties:
+                journey_id: {type: string, format: uuid}
+                latitude: {type: number}
+                longitude: {type: number}
+                women_only: {type: boolean, default: false}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [companions]
+                properties:
+                  companions: {type: array, items: {$ref: "#/components/schemas/CompanionCard"}}
+        "404": {description: no_open_journey}
+  /walks:
+    post:
+      tags: [walk]
+      summary: Ask a companion to walk with me
+      description: The companion sees my first name and rough area; the request expires after 10 minutes.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [journey_id, companion_id, latitude, longitude]
+              properties:
+                journey_id: {type: string, format: uuid}
+                companion_id: {type: string, format: uuid}
+                latitude: {type: number}
+                longitude: {type: number}
+      responses:
+        "201": {description: Requested, content: {application/json: {schema: {$ref: "#/components/schemas/WalkView"}}}}
+        "404": {description: no_open_journey}
+        "409": {description: "companion_unavailable, walk_already_open or no_profile"}
+        "422": {description: cannot_ask_yourself}
+  /walks/requests:
+    get:
+      tags: [walk]
+      summary: Requests waiting for me (companion)
+      security: [{bearer: []}]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requests]
+                properties:
+                  requests: {type: array, items: {$ref: "#/components/schemas/WalkRequest"}}
+  /walks/current:
+    get:
+      tags: [walk]
+      summary: My open walk (requested or accepted), as traveller or companion
+      security: [{bearer: []}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/WalkView"}}}}
+        "404": {description: no_walk}
+  /walks/{walk_id}:
+    get:
+      tags: [walk]
+      summary: One of my walks, also after it ended
+      security: [{bearer: []}]
+      parameters: [{name: walk_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/WalkView"}}}}
+        "404": {description: walk_not_found}
+  /walks/{walk_id}/accept:
+    post:
+      tags: [walk]
+      summary: Companion accepts with a fresh face scan; both then see the handshake code and share live location (E2E)
+      description: >
+        Every accept needs a fresh face scan of the person holding the phone (selfie_image) in
+        this same request, so a modified app cannot skip it. Only a passing scan accepts the walk
+        and opens the two-way live location. FACE_CHECK_PROVIDER=mock checks only that a real
+        image was sent (the phone checks one face is visible); compreface matches it against the
+        face template saved at verification. The image is never stored; pass/fail is audited.
+      security: [{bearer: []}]
+      parameters: [{name: walk_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [selfie_image]
+              properties:
+                selfie_image: {type: string, format: binary, description: "JPEG, PNG or WebP, max 5 MB"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/WalkView"}}}}
+        "403": {description: "not_eligible or face_mismatch"}
+        "409": {description: "walk_expired, walk_declined, walk_cancelled, already_walking, or face_template_not_enrolled (compreface)"}
+        "413": {description: image_too_large}
+        "415": {description: unsupported_image_type}
+        "422": {description: "empty_image or face_image_invalid"}
+        "428": {description: face_scan_required}
+        "503": {description: "Face matcher unavailable (compreface): fails closed, retry"}
+  /walks/{walk_id}/decline:
+    post:
+      tags: [walk]
+      summary: Companion declines
+      security: [{bearer: []}]
+      parameters: [{name: walk_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {"204": {description: Done}}
+  /walks/{walk_id}/cancel:
+    post:
+      tags: [walk]
+      summary: Traveller withdraws an unanswered request
+      security: [{bearer: []}]
+      parameters: [{name: walk_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {"204": {description: Done}}
+  /walks/{walk_id}/end:
+    post:
+      tags: [walk]
+      summary: Either side ends the walk; the traveller's journey keeps running
+      security: [{bearer: []}]
+      parameters: [{name: walk_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {$ref: "#/components/schemas/WalkView"}}}}
+        "409": {description: Walk not accepted}
+  /feedback:
+    post:
+      tags: [feedback]
+      summary: How was it? (journey owner only, once per journey and once per walk)
+      description: Stored raw. No location, no names; nothing is scored yet. Exported by backend/scripts/feedback.py.
+      security: [{bearer: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [journey_id, route_stars]
+              properties:
+                journey_id: {type: string, format: uuid}
+                walk_id: {type: string, format: uuid, nullable: true, description: An ended walk on this journey}
+                route_stars: {type: integer, minimum: 1, maximum: 5}
+                companion_stars: {type: integer, minimum: 1, maximum: 5, nullable: true, description: Only with walk_id}
+                chips:
+                  type: array
+                  items: {type: string, enum: [well_lit, felt_uneasy, companion_was_late, route_confusing, would_walk_again, busy_street, poor_footpath]}
+                note: {type: string, maxLength: 500}
+      responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema: {type: object, required: [id], properties: {id: {type: string, format: uuid}}}
+        "404": {description: "journey_not_found or walk_not_found"}
+        "409": {description: feedback_already_given}
+        "422": {description: Invalid field}
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: "Access token from /auth/otp/verify or /auth/device/verify. Send as Authorization: Bearer <token>."
+  responses:
+    ValidationError:
+      description: Request body failed validation
+    NotAuthenticated:
+      description: "Missing, expired or unknown access token (detail: not_authenticated)"
+  schemas:
+    RankedRoute:
+      type: object
+      required: [kind, points, distance_m, duration_s, extra_m, extra_s, score, support, concern,
+                 coverage, evidence, counts, facts, why]
+      properties:
+        kind: {type: string, enum: [recommended, shortest, alternative]}
+        points: {type: array, description: "[lat, lon] pairs",
+                 items: {type: array, items: {type: number}, minItems: 2, maxItems: 2}}
+        distance_m: {type: integer}
+        duration_s: {type: integer}
+        extra_m: {type: integer, description: Against the shortest route}
+        extra_s: {type: integer}
+        score: {type: number, description: "0..1: support reduced by concern"}
+        support: {type: number, description: "0..1 from what is around the route at this hour"}
+        concern: {type: number, description: "0..1 from published report cells only"}
+        coverage: {type: number, description: Share of the route inside the data area}
+        evidence: {$ref: "#/components/schemas/RiskLabel"}
+        counts:
+          type: object
+          additionalProperties: {type: integer}
+          example: {lamp: 38, open: 12, bus_stop: 3, station: 1, police: 0, hospital: 1}
+        facts: {type: array, items: {type: string}, example: ["38 streetlights", "12 places open late"]}
+        why: {type: array, items: {type: string}, example: ["+1 min", "38 streetlights vs 11"],
+              description: Only on the recommended route, against the shortest}
+    RankedRoutes:
+      type: object
+      required: [area, time_band, shortest, recommended, routes, note]
+      properties:
+        area: {type: string, example: indiranagar}
+        time_band: {type: string, enum: [day, evening, night]}
+        shortest: {type: integer, description: Index into routes}
+        recommended: {type: integer, description: Index into routes; may equal shortest}
+        routes: {type: array, items: {$ref: "#/components/schemas/RankedRoute"}}
+        note: {type: string}
+    RiskLabel:
+      type: string
+      enum: ["Strong evidence of concern", "Some reports of concern", "Insufficient data"]
+      description: Rule 5. There is no "safe" label; no reports means unknown.
+    PlaceReport:
+      type: object
+      required: [lat, lon, category, reporter]
+      properties:
+        lat: {type: number}
+        lon: {type: number}
+        category: {type: string, enum: [dark, no_footpath, harassment, unsafe_crossing, other]}
+        reporter: {type: string, minLength: 8, maxLength: 128,
+                   description: Opaque per-install token; only its HMAC is stored}
+    ReportCell:
+      type: object
+      required: [lat, lon, count, weight]
+      properties:
+        lat: {type: number, description: Cell centre (~55 m cells)}
+        lon: {type: number}
+        count: {type: integer}
+        weight: {type: number, description: Decayed evidence}
+    RouteArea:
+      type: object
+      required: [name, label, bbox, sources, counts, published_cells, publish_min_reports,
+                 publish_min_devices, demo]
+      properties:
+        name: {type: string}
+        label: {type: string}
+        bbox: {type: array, items: {type: number}, minItems: 4, maxItems: 4,
+               description: "south, west, north, east"}
+        sources: {type: array, items: {type: string}}
+        counts: {type: object, additionalProperties: {type: integer}}
+        published_cells: {type: array, items: {$ref: "#/components/schemas/ReportCell"}}
+        publish_min_reports: {type: integer}
+        publish_min_devices: {type: integer}
+        demo: {type: boolean, description: Dev server; the demo page may simulate reporters}
+    EscortStart:
+      type: object
+      required: [journey_id, minutes, contact_link_ids]
+      properties:
+        journey_id: {type: string, format: uuid}
+        minutes: {type: integer, minimum: 5, maximum: 180}
+        contact_link_ids: {type: array, minItems: 1, maxItems: 5, items: {type: string, format: uuid}}
+        request_id: {type: string, format: uuid, nullable: true}
+    EscortView:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        journey_id: {type: string, format: uuid}
+        started_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        listener_link_ids: {type: array, items: {type: string, format: uuid}}
+    Stopped:
+      type: object
+      properties:
+        stopped: {type: boolean}
+    ListeningList:
+      type: object
+      properties:
+        escorts:
+          type: array
+          items:
+            type: object
+            properties:
+              escort_id: {type: string, format: uuid}
+              journey_id: {type: string, format: uuid}
+              contact_link_id: {type: string, format: uuid}
+              owner_label: {type: string}
+              ends_at: {type: string, format: date-time}
+    SupportedList:
+      type: object
+      properties:
+        people:
+          type: array
+          items:
+            type: object
+            properties:
+              contact_link_id: {type: string, format: uuid}
+              owner_label: {type: string}
+    EscortRequestView:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        contact_link_id: {type: string, format: uuid}
+        created_at: {type: string, format: date-time}
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: {type: string}
+    OtpRequest:
+      type: object
+      required: [email]
+      properties:
+        email: {type: string, format: email}
+    OtpRequestAccepted:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [sent]}
+    OtpVerify:
+      type: object
+      required: [email, code, device_public_key]
+      properties:
+        email: {type: string, format: email}
+        code: {type: string, pattern: "^\\d{6}$", description: 6 digits, keep leading zeros}
+        device_public_key:
+          type: string
+          maxLength: 512
+          description: >
+            Base64 (standard, with padding) X.509 SubjectPublicKeyInfo DER of an EC P-256 key
+            generated in the Android Keystore (`keyStore.getCertificate(alias).publicKey.encoded`).
+    DeviceChallengeRequest:
+      type: object
+      required: [device_id]
+      properties:
+        device_id: {type: string, format: uuid}
+    DeviceChallenge:
+      type: object
+      required: [nonce, expires_in]
+      properties:
+        nonce: {type: string}
+        expires_in: {type: integer, example: 120}
+    DeviceVerify:
+      type: object
+      required: [device_id, nonce, signature]
+      properties:
+        device_id: {type: string, format: uuid}
+        nonce: {type: string, maxLength: 128}
+        signature:
+          type: string
+          maxLength: 256
+          description: "Base64 DER ECDSA signature (SHA256withECDSA) over sixthsense-device-auth-v1|<device_id>|<nonce>"
+    Session:
+      type: object
+      required: [access_token, token_type, expires_in, account_id, device_id]
+      properties:
+        access_token: {type: string}
+        token_type: {type: string, enum: [bearer]}
+        expires_in: {type: integer, example: 900, description: seconds}
+        account_id: {type: string, format: uuid}
+        device_id: {type: string, format: uuid, description: Store this on the phone}
+    E2EKeysUpload:
+      type: object
+      required: [x25519_public_key, ed25519_public_key]
+      properties:
+        x25519_public_key: {type: string, maxLength: 64, description: Base64 raw 32-byte X25519 public key}
+        ed25519_public_key: {type: string, maxLength: 64, description: Base64 raw 32-byte Ed25519 public key}
+    E2EKeys:
+      type: object
+      required: [key_id, x25519_public_key, ed25519_public_key]
+      properties:
+        key_id: {type: string, format: uuid}
+        x25519_public_key: {type: string}
+        ed25519_public_key: {type: string}
+    InviteCreate:
+      type: object
+      required: [owner_label]
+      properties:
+        owner_label: {type: string, minLength: 1, maxLength: 40, description: "How the contact sees you in alerts, e.g. Priya"}
+    Invite:
+      type: object
+      required: [contact_link_id, invite_token, invite_url, expires_at]
+      properties:
+        contact_link_id: {type: string, format: uuid, description: Store on the phone next to the contact's name and number}
+        invite_token: {type: string}
+        invite_url: {type: string, example: "https://sixthsense.app/invite#<token>"}
+        expires_at: {type: string, format: date-time}
+    InviteAccept:
+      type: object
+      required: [invite_token]
+      properties:
+        invite_token: {type: string, maxLength: 128, description: The part of the link after '#'}
+    InviteAccepted:
+      type: object
+      required: [owner_label]
+      properties:
+        owner_label: {type: string}
+    ContactLink:
+      type: object
+      required: [id, status, created_at, accepted_at, invite_expires_at]
+      properties:
+        id: {type: string, format: uuid}
+        status: {type: string, enum: [pending, accepted]}
+        created_at: {type: string, format: date-time}
+        accepted_at: {type: [string, "null"], format: date-time}
+        invite_expires_at: {type: [string, "null"], format: date-time, description: Only for pending invites}
+    ContactList:
+      type: object
+      required: [contacts]
+      properties:
+        contacts: {type: array, items: {$ref: "#/components/schemas/ContactLink"}}
+    ContactKey:
+      type: object
+      required: [key_id, x25519_public_key, ed25519_public_key]
+      properties:
+        key_id: {type: string, format: uuid}
+        x25519_public_key: {type: string}
+        ed25519_public_key: {type: string}
+    ContactKeys:
+      type: object
+      required: [contact_link_id, keys]
+      properties:
+        contact_link_id: {type: string, format: uuid}
+        keys: {type: array, items: {$ref: "#/components/schemas/ContactKey"}}
+    ProtocolSettings:
+      type: object
+      properties:
+        check_in_interval_min: {type: integer, minimum: 1, maximum: 240, default: 15}
+        check_in_grace_min: {type: integer, minimum: 0, maximum: 30, default: 2, description: "T1: check-in due -> private prompt"}
+        prompt_timeout_min: {type: integer, minimum: 1, maximum: 30, default: 2, description: "T2: private prompt -> contacts alerted"}
+        contact_response_min: {type: integer, minimum: 1, maximum: 60, default: 5, description: "Contacts alerted -> full escalation"}
+        heartbeat_timeout_min: {type: integer, minimum: 2, maximum: 120, default: 10, description: "Silent phone -> contacts alerted"}
+        auto_112: {type: boolean, default: false}
+        alert_contact_ids:
+          type: [array, "null"]
+          maxItems: 5
+          items: {type: string, format: uuid}
+          description: Trusted contact link ids to alert; null = all accepted contacts
+    JourneyStart:
+      type: object
+      properties:
+        check_in_interval_min: {type: [integer, "null"], minimum: 1, maximum: 240, description: Override for this journey}
+    CheckIn:
+      type: object
+      required: [result]
+      properties:
+        result: {type: string, enum: [ok, duress], description: Which PIN the phone accepted}
+    Sos:
+      type: object
+      properties:
+        covert: {type: boolean, default: false}
+    JourneyView:
+      type: object
+      required: [id, state, outcome, started_at, next_check_in_at, timers]
+      properties:
+        id: {type: string, format: uuid}
+        state:
+          type: string
+          enum: [active, check_in_due, private_prompt, contact_alert, full_escalation, resolved]
+          description: A covert escalation is shown as active (or resolved after arrive/end)
+        outcome: {type: [string, "null"], enum: [arrived, ended, resolved_by_contact, null]}
+        started_at: {type: string, format: date-time}
+        next_check_in_at: {type: string, format: date-time}
+        timers: {$ref: "#/components/schemas/ProtocolSettings"}
+    ChannelStatus:
+      type: object
+      required: [push, telegram, email, push_available, telegram_available]
+      properties:
+        push: {type: boolean, description: This device has sent its FCM token}
+        telegram: {type: boolean}
+        email: {type: boolean}
+        push_available: {type: boolean, description: Server has FCM configured}
+        telegram_available: {type: boolean, description: Server has a Telegram bot configured}
+    PushToken:
+      type: object
+      required: [fcm_token]
+      properties:
+        fcm_token: {type: string, maxLength: 4096}
+    TelegramLink:
+      type: object
+      required: [url, expires_in]
+      properties:
+        url: {type: string, example: "https://t.me/sixthsense_bot?start=<token>"}
+        expires_in: {type: integer, example: 600}
+    AlertEmail:
+      type: object
+      required: [email]
+      properties:
+        email: {type: string, format: email}
+    ActiveEscalation:
+      type: object
+      required: [id, owner_label, level, covert, opened_at, acknowledged, verification_code]
+      properties:
+        id: {type: string, format: uuid}
+        journey_id: {type: string, format: uuid, nullable: true, description: "Matches session_id in live location envelopes"}
+        owner_label: {type: string}
+        level: {type: string, enum: [contact_alert, full_escalation]}
+        covert: {type: boolean, description: "Silent alarm: do NOT call their phone"}
+        opened_at: {type: string, format: date-time}
+        acknowledged: {type: boolean}
+        i_am_helping: {type: boolean, description: "I said I'm on it, so I share my location back"}
+        helpers_going: {type: integer}
+        verification_code: {type: string, example: 7KQ2-9M4D, description: "Same code as in the Telegram/email alert; if they differ, that message is fake"}
+    ActiveEscalations:
+      type: object
+      required: [escalations]
+      properties:
+        escalations: {type: array, items: {$ref: "#/components/schemas/ActiveEscalation"}}
+    HelperKey:
+      type: object
+      required: [key_id, x25519_public_key, ed25519_public_key]
+      properties:
+        key_id: {type: string, format: uuid}
+        x25519_public_key: {type: string, format: byte}
+        ed25519_public_key: {type: string, format: byte}
+    OwnerKeys:
+      type: object
+      required: [journey_id, keys]
+      properties:
+        journey_id: {type: string, format: uuid}
+        keys: {type: array, items: {$ref: "#/components/schemas/HelperKey"}}
+    Helper:
+      type: object
+      required: [id, kind, status, accepted_at, keys]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, enum: [contact, responder]}
+        label: {type: string, nullable: true, description: "Responder's display name; contacts are named on the phone"}
+        contact_link_id: {type: string, format: uuid, nullable: true}
+        status: {type: string, enum: [going, arrived]}
+        accepted_at: {type: string, format: date-time}
+        keys: {type: array, items: {$ref: "#/components/schemas/HelperKey"}}
+    HelpView:
+      type: object
+      required: [full_alert, any_alert, helpers]
+      properties:
+        full_alert: {type: boolean}
+        any_alert: {type: boolean}
+        helpers: {type: array, items: {$ref: "#/components/schemas/Helper"}}
+        search:
+          nullable: true
+          description: "Nearby responder search during a full alert: counts only, never who or where"
+          type: object
+          required: [radius_m, on_duty_nearby, asked, going]
+          properties:
+            radius_m: {type: integer, description: "500, then 1000, then 2000"}
+            on_duty_nearby: {type: integer}
+            asked: {type: integer}
+            going: {type: integer}
+    LatLng:
+      type: object
+      required: [latitude, longitude]
+      properties:
+        latitude: {type: number, minimum: -90, maximum: 90}
+        longitude: {type: number, minimum: -180, maximum: 180}
+    ResponderApply:
+      type: object
+      required: [display_name]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 40}
+    ResponderMe:
+      type: object
+      required: [status, on_duty]
+      properties:
+        status: {type: string, enum: [none, pending, approved, revoked]}
+        display_name: {type: string, nullable: true}
+        on_duty: {type: boolean}
+    OnDuty:
+      type: object
+      required: [on_duty, expires_in_seconds]
+      properties:
+        on_duty: {type: boolean}
+        expires_in_seconds: {type: integer}
+    ResponderOffer:
+      type: object
+      required: [id, status, distance_m, walk_minutes, covert, opened_at, helpers_going]
+      properties:
+        id: {type: string, format: uuid}
+        journey_id: {type: string, format: uuid, nullable: true, description: "Only after I'm going"}
+        status: {type: string, enum: [offered, going, declined]}
+        distance_m: {type: integer, description: "From rough areas (+-150 m)"}
+        walk_minutes: {type: integer}
+        rough_area: {allOf: [{$ref: "#/components/schemas/LatLng"}], nullable: true}
+        covert: {type: boolean}
+        opened_at: {type: string, format: date-time}
+        helpers_going: {type: integer}
+        arrived: {type: boolean}
+    ResponderOffers:
+      type: object
+      required: [offers]
+      properties:
+        offers: {type: array, items: {$ref: "#/components/schemas/ResponderOffer"}}
+    LinkAck:
+      type: object
+      required: [token]
+      properties:
+        token: {type: string, maxLength: 128}
+    Acknowledged:
+      type: object
+      required: [owner_label, acknowledged]
+      properties:
+        owner_label: {type: string}
+        acknowledged: {type: boolean}
+    Resolved:
+      type: object
+      required: [journey_state]
+      properties:
+        journey_state: {type: string, enum: [active, resolved]}
+    Raised:
+      type: object
+      required: [journey_state]
+      properties:
+        journey_state: {type: string, enum: [full_escalation]}
+    SigningKey:
+      type: object
+      required: [key_id, alg, ed25519_public_key]
+      properties:
+        key_id: {type: string}
+        alg: {type: string, enum: [Ed25519]}
+        ed25519_public_key: {type: string, description: Base64 raw 32-byte public key}
+    SigningKeys:
+      type: object
+      required: [keys]
+      properties:
+        keys: {type: array, items: {$ref: "#/components/schemas/SigningKey"}}
+    Profile:
+      type: object
+      required: [first_name]
+      properties:
+        first_name: {type: string, minLength: 1, maxLength: 40}
+        bio: {type: string, maxLength: 200}
+        strengths:
+          type: array
+          items: {type: string, enum: [knows_the_area, first_aid_trained, walks_this_route_daily, speaks_kannada, speaks_hindi, self_defence_trained, calm_in_a_crisis, campus_volunteer]}
+        languages: {type: array, items: {type: string, maxLength: 30}, maxItems: 8}
+        gender: {type: string, enum: [woman, man, non_binary], nullable: true}
+        willing_companion: {type: boolean}
+    PartnerProfile:
+      type: object
+      description: What a walk partner sees. No gender, no account details.
+      required: [first_name, bio, strengths, languages]
+      properties:
+        first_name: {type: string}
+        bio: {type: string}
+        strengths: {type: array, items: {type: string}}
+        languages: {type: array, items: {type: string}}
+    CompanionMe:
+      type: object
+      required: [status, available]
+      properties:
+        status: {type: string, enum: [none, approved, revoked], description: "approved = joined (no approval step)"}
+        identity_verified: {type: boolean, description: "Verified, adult, unexpired identity (ID + selfie)"}
+        verified_method: {type: string, nullable: true, description: '"identity" = joined after identity verification'}
+        verified_at: {type: string, format: date-time, nullable: true}
+        available: {type: boolean}
+    WalkArea:
+      type: object
+      required: [latitude, longitude]
+      description: A rough area, rounded to ~110 m on the server
+      properties:
+        latitude: {type: number}
+        longitude: {type: number}
+    CompanionCard:
+      type: object
+      required: [companion_id, profile, rating_count, distance_m, walk_minutes]
+      properties:
+        companion_id: {type: string, format: uuid}
+        profile: {$ref: "#/components/schemas/PartnerProfile"}
+        rating: {type: number, nullable: true, description: Average companion stars from past walks}
+        rating_count: {type: integer}
+        distance_m: {type: integer, description: Rounded to 100 m}
+        walk_minutes: {type: integer}
+    WalkRequest:
+      type: object
+      required: [id, traveller_first_name, expires_at]
+      properties:
+        id: {type: string, format: uuid}
+        traveller_first_name: {type: string}
+        rough_area: {$ref: "#/components/schemas/WalkArea"}
+        distance_m: {type: integer, nullable: true}
+        expires_at: {type: string, format: date-time}
+    WalkView:
+      type: object
+      required: [id, role, status, partner_keys, expires_at]
+      properties:
+        id: {type: string, format: uuid, description: Also the live-location session id while accepted}
+        role: {type: string, enum: [traveller, companion]}
+        status: {type: string, enum: [requested, accepted, declined, expired, cancelled, ended]}
+        journey_id: {type: string, format: uuid, nullable: true, description: Traveller only}
+        partner: {$ref: "#/components/schemas/PartnerProfile"}
+        handshake_code: {type: string, nullable: true, description: Same 4 digits on both phones}
+        meet_near: {$ref: "#/components/schemas/WalkArea"}
+        partner_keys: {type: array, items: {$ref: "#/components/schemas/HelperKey"}}
+        expires_at: {type: string, format: date-time}
+        ended_at: {type: string, format: date-time, nullable: true}
+        end_reason: {type: string, nullable: true, enum: [traveller, companion, journey_over, null]}
