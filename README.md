@@ -20,21 +20,58 @@ The product works in four layers:
 Deploying to a server: see [`DEPLOY.md`](DEPLOY.md). Detailed design: see [`Docs/`](Docs/)
 (the design documents call the product *SafeThread*).
 
+![SixthSense system architecture](Docs/images/hld/01_system_architecture.png)
+
+---
+
+## Download and install the app
+
+**[Download the SixthSense Android app (APK)](https://drive.google.com/file/d/1YD-t8q_AAa62WVd5ArUvbQ0niCnqKr8L/view?usp=sharing)**
+
+The APK works on almost every Android phone from the last 7 to 8 years (64-bit, Android 8 or
+newer) and connects to the SixthSense test server.
+
+1. Open the link on the phone and download the file (`.apk`). If the link opens in Drive, tap
+   the download icon.
+2. Open the downloaded file. Android asks for permission to install apps from this source
+   (Chrome, Files or Drive): tap **Settings**, turn on **Allow from this source**, then go back.
+3. Tap **Install**. If Play Protect warns about an unknown app, tap **More details** and
+   **Install anyway** (the app is not on the Play Store yet).
+4. If an older SixthSense build is already on the phone, uninstall it first; builds signed with a
+   different key cannot update each other.
+5. Open SixthSense, enter your email and type the 6-digit code you receive. Check the spam folder
+   the first time.
+
+**Allow these when the app asks, so protection keeps working with the screen off:**
+
+| Permission | Why |
+|---|---|
+| Notifications | Check-in reminders and alerts |
+| Location ("while using" and precise) | Live location during an alert or a walk, nearby helpers |
+| Alarms & reminders | Reliable check-in timer |
+| Battery: Unrestricted | Phone makers' battery savers can stop the timer (Xiaomi, Oppo, Vivo, Realme, Samsung) |
+| SMS (optional) | Offline SOS by text when there is no internet |
+| Camera | Selfie and face scan, only for companions and responders |
+| Microphone (optional) | Voice SOS words and audio evidence |
+
+To point the app at your own server, build it yourself; see [`DEPLOY.md`](DEPLOY.md), section 5.
+
 ---
 
 ## Contents
 
-1. [Features for the person travelling](#features-for-the-person-travelling)
-2. [Features for trusted contacts](#features-for-trusted-contacts)
-3. [Features for companions and responders](#features-for-companions-and-responders)
-4. [Ratings, moderation and the admin page](#ratings-moderation-and-the-admin-page)
-5. [Routes, place reports and the dashboard](#routes-place-reports-and-the-dashboard)
-6. [Privacy and security](#privacy-and-security)
-7. [Architecture](#architecture)
-8. [Repository layout](#repository-layout)
-9. [Running locally](#running-locally)
-10. [Configuration](#configuration)
-11. [Tests](#tests)
+1. [Download and install the app](#download-and-install-the-app)
+2. [Features for the person travelling](#features-for-the-person-travelling)
+3. [Features for trusted contacts](#features-for-trusted-contacts)
+4. [Features for companions and responders](#features-for-companions-and-responders)
+5. [Ratings, moderation and the admin page](#ratings-moderation-and-the-admin-page)
+6. [Routes, place reports and the dashboard](#routes-place-reports-and-the-dashboard)
+7. [Privacy and security](#privacy-and-security)
+8. [Architecture and design diagrams](#architecture-and-design-diagrams)
+9. [Repository layout](#repository-layout)
+10. [Running locally](#running-locally)
+11. [Configuration](#configuration)
+12. [Tests](#tests)
 
 ---
 
@@ -227,7 +264,39 @@ app rather than fetched at runtime.
 
 ---
 
-## Architecture
+## Architecture and design diagrams
+
+The five high-level design diagrams below show how SixthSense works end to end. Full-size files
+are in [`Docs/images/hld/`](Docs/images/hld/).
+
+### 1. System architecture on Vultr
+One Android app, two APIs with separate data zones, and one Vultr server behind HTTPS.
+
+![System architecture on Vultr](Docs/images/hld/01_system_architecture.png)
+
+### 2. From a journey to help arriving
+Timers run on the phone, the server escalates, and helpers are reached in steps until someone
+answers.
+
+![From a journey to help arriving](Docs/images/hld/02_journey_to_help.png)
+
+### 3. Walk With Me
+A verified companion walks with the traveller; each phone sees the other only during the walk.
+
+![Walk With Me](Docs/images/hld/03_walk_with_me.png)
+
+### 4. Helper trust: verification, face scan and moderation
+Only helpers are verified, images and ID numbers are never stored, and a bad review can end it.
+
+![Helper trust](Docs/images/hld/04_helper_trust.png)
+
+### 5. Privacy by design
+Identifiable data and anonymous place data never meet, and location travels end-to-end
+encrypted.
+
+![Privacy by design](Docs/images/hld/05_privacy_and_data.png)
+
+### In text
 
 ```
  Android app (Flutter)
